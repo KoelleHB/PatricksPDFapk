@@ -33,9 +33,6 @@ jobs:
       - name: Sync with Capacitor Android
         run: npx cap sync android
 
-      - name: Accept Android SDK Licenses
-        run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
-
       - name: Make Gradle wrapper executable
         run: chmod +x android/gradlew
 
