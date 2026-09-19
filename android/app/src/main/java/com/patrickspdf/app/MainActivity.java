@@ -15,16 +15,23 @@ import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
+import java.util.ArrayList;
 
 public class MainActivity extends BridgeActivity {
     private static final String TAG = "PatricksPDF_Native";
     private volatile String pendingPdfJson = null;
 
-    public class NativePdfBridgeInterface {
+    public static class NativePdfBridgeInterface {
+        private final MainActivity activity;
+
+        public NativePdfBridgeInterface(MainActivity activity) {
+            this.activity = activity;
+        }
+
         @JavascriptInterface
         public String getPendingPdf() {
-            String res = pendingPdfJson;
-            pendingPdfJson = null;
+            String res = activity.pendingPdfJson;
+            activity.pendingPdfJson = null;
             return res;
         }
     }
@@ -35,7 +42,7 @@ public class MainActivity extends BridgeActivity {
 
         // Expose NativePdfBridge to JavaScript
         if (getBridge() != null && getBridge().getWebView() != null) {
-            getBridge().getWebView().addJavascriptInterface(new NativePdfBridgeInterface(), "NativePdfBridge");
+            getBridge().getWebView().addJavascriptInterface(new NativePdfBridgeInterface(this), "NativePdfBridge");
         }
 
         handleIncomingIntent(getIntent());
@@ -60,10 +67,17 @@ public class MainActivity extends BridgeActivity {
             // Check EXTRA_STREAM first (used by Share Sheet)
             if (intent.hasExtra(Intent.EXTRA_STREAM)) {
                 try {
-                    if (android.os.Build.VERSION.SDK_INT >= 33) {
-                        targetUri = intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri.class);
-                    } else {
-                        targetUri = (Uri) intent.getParcelableExtra(Intent.EXTRA_STREAM);
+                    Bundle extras = intent.getExtras();
+                    if (extras != null) {
+                        Object extra = extras.get(Intent.EXTRA_STREAM);
+                        if (extra instanceof Uri) {
+                            targetUri = (Uri) extra;
+                        } else if (extra instanceof ArrayList) {
+                            ArrayList<?> list = (ArrayList<?>) extra;
+                            if (!list.isEmpty() && list.get(0) instanceof Uri) {
+                                targetUri = (Uri) list.get(0);
+                            }
+                        }
                     }
                 } catch (Exception e) {
                     Log.w(TAG, "Error getting EXTRA_STREAM: " + e.getMessage());
