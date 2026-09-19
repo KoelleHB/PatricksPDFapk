@@ -20,20 +20,22 @@ public class MainActivity extends BridgeActivity {
     private static final String TAG = "PatricksPDF_Native";
     private volatile String pendingPdfJson = null;
 
+    public class NativePdfBridgeInterface {
+        @JavascriptInterface
+        public String getPendingPdf() {
+            String res = pendingPdfJson;
+            pendingPdfJson = null;
+            return res;
+        }
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
         // Expose NativePdfBridge to JavaScript
         if (getBridge() != null && getBridge().getWebView() != null) {
-            getBridge().getWebView().addJavascriptInterface(new Object() {
-                @JavascriptInterface
-                public String getPendingPdf() {
-                    String res = pendingPdfJson;
-                    pendingPdfJson = null;
-                    return res;
-                }
-            }, "NativePdfBridge");
+            getBridge().getWebView().addJavascriptInterface(new NativePdfBridgeInterface(), "NativePdfBridge");
         }
 
         handleIncomingIntent(getIntent());
@@ -58,7 +60,11 @@ public class MainActivity extends BridgeActivity {
             // Check EXTRA_STREAM first (used by Share Sheet)
             if (intent.hasExtra(Intent.EXTRA_STREAM)) {
                 try {
-                    targetUri = intent.getParcelableExtra(Intent.EXTRA_STREAM);
+                    if (android.os.Build.VERSION.SDK_INT >= 33) {
+                        targetUri = intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri.class);
+                    } else {
+                        targetUri = (Uri) intent.getParcelableExtra(Intent.EXTRA_STREAM);
+                    }
                 } catch (Exception e) {
                     Log.w(TAG, "Error getting EXTRA_STREAM: " + e.getMessage());
                 }
