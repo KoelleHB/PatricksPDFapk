@@ -110,39 +110,11 @@ export const PdfPageView = memo<PdfPageViewProps>(({
     return () => observer.disconnect();
   }, []);
 
-  // Render canvas, selectable text layer, and extract links when near viewport or when arrayBuffer/zoom changes
+  // Extract link annotations once when page becomes near viewport or arrayBuffer changes
   useEffect(() => {
-    if (!isNearViewport || !arrayBuffer || !canvasRef.current) return;
-
+    if (!isNearViewport || !arrayBuffer) return;
     let isCancelled = false;
-    setIsLoading(true);
 
-    const canvas = canvasRef.current;
-
-    renderPdfPageToCanvas(arrayBuffer, pageNumber, canvas, 2.0)
-      .then((dims) => {
-        if (!isCancelled && dims) {
-          setIsRendered(true);
-          setIsLoading(false);
-        }
-      })
-      .catch((err) => {
-        if (!isCancelled && err?.name !== 'RenderingCancelledException') {
-          console.warn(`Failed to render canvas for page ${pageNumber}:`, err);
-          setIsLoading(false);
-        }
-      });
-
-    // Render selectable & markable text layer for copying and selection
-    if (textLayerRef.current) {
-      renderPdfTextLayer(arrayBuffer, pageNumber, textLayerRef.current, pageWidth).catch((err) => {
-        if (!isCancelled) {
-          console.warn(`Failed to render text layer for page ${pageNumber}:`, err);
-        }
-      });
-    }
-
-    // Extract link annotations
     extractPageLinks(arrayBuffer, pageNumber).then((extractedLinks) => {
       if (!isCancelled) {
         setLinks(extractedLinks);
@@ -151,14 +123,68 @@ export const PdfPageView = memo<PdfPageViewProps>(({
 
     return () => {
       isCancelled = true;
-      if (canvas) {
+    };
+  }, [isNearViewport, arrayBuffer, pageNumber]);
+
+  // Render canvas with smooth debouncing on zoom changes
+  useEffect(() => {
+    if (!isNearViewport || !arrayBuffer || !canvasRef.current) return;
+
+    let isCancelled = false;
+    const canvas = canvasRef.current;
+
+    // Scale multiplier: maintain crisp high-DPI rendering without overloading the GPU
+    const scaleMultiplier = Math.min(2.5, Math.max(1.5, (zoomLevel / 100) * 1.5));
+
+    // Debounce re-rendering if page is already rendered to allow buttery smooth zoom animations
+    const delay = isRendered ? 150 : 0;
+    const timer = setTimeout(() => {
+      setIsLoading(true);
+      renderPdfPageToCanvas(arrayBuffer, pageNumber, canvas, scaleMultiplier)
+        .then((dims) => {
+          if (!isCancelled && dims) {
+            setIsRendered(true);
+            setIsLoading(false);
+          }
+        })
+        .catch((err) => {
+          if (!isCancelled && err?.name !== 'RenderingCancelledException') {
+            console.warn(`Failed to render canvas for page ${pageNumber}:`, err);
+            setIsLoading(false);
+          }
+        });
+    }, delay);
+
+    return () => {
+      isCancelled = true;
+      clearTimeout(timer);
+      if (canvas && !isRendered) {
         cancelCanvasRender(canvas);
       }
-      if (textLayerRef.current) {
-        textLayerRef.current.innerHTML = '';
-      }
     };
-  }, [isNearViewport, arrayBuffer, pageNumber, zoomLevel, pageWidth]);
+  }, [isNearViewport, arrayBuffer, pageNumber, zoomLevel]);
+
+  // Render selectable text layer (debounced on zoom/width changes)
+  useEffect(() => {
+    if (!isNearViewport || !arrayBuffer || !textLayerRef.current) return;
+
+    let isCancelled = false;
+    const textLayerEl = textLayerRef.current;
+
+    const delay = isRendered ? 180 : 0;
+    const timer = setTimeout(() => {
+      renderPdfTextLayer(arrayBuffer, pageNumber, textLayerEl, pageWidth).catch((err) => {
+        if (!isCancelled) {
+          console.warn(`Failed to render text layer for page ${pageNumber}:`, err);
+        }
+      });
+    }, delay);
+
+    return () => {
+      isCancelled = true;
+      clearTimeout(timer);
+    };
+  }, [isNearViewport, arrayBuffer, pageNumber, pageWidth]);
 
   return (
     <div
@@ -175,9 +201,9 @@ export const PdfPageView = memo<PdfPageViewProps>(({
           : 'border-slate-300 shadow-sm'
       }`}
     >
-      {/* Loading placeholder spinner if not yet rendered */}
-      {(!isRendered || isLoading) && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-50/80 text-slate-400 gap-2 z-5">
+      {/* Loading placeholder spinner ONLY on initial render before page is first painted */}
+      {!isRendered && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-50 text-slate-400 gap-2 z-5">
           <Loader2 className="w-6 h-6 animate-spin text-blue-500" />
           <span className="text-xs font-mono">Loading page {pageNumber}...</span>
         </div>

@@ -357,19 +357,33 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
     active: boolean;
     startDist: number;
     startZoom: number;
-    centerX: number;
-    centerY: number;
-    startScrollLeft: number;
-    startScrollTop: number;
+    focalX: number;
+    focalY: number;
+    focalContentX: number;
+    focalContentY: number;
+    startMidX: number;
+    startMidY: number;
+    currentScale: number;
+    panX: number;
+    panY: number;
   }>({
     active: false,
     startDist: 0,
     startZoom: 100,
-    centerX: 0,
-    centerY: 0,
-    startScrollLeft: 0,
-    startScrollTop: 0,
+    focalX: 0,
+    focalY: 0,
+    focalContentX: 0,
+    focalContentY: 0,
+    startMidX: 0,
+    startMidY: 0,
+    currentScale: 1,
+    panX: 0,
+    panY: 0,
   });
+
+  const contentWrapperRef = useRef<HTMLDivElement>(null);
+  const zoomPillRef = useRef<HTMLDivElement>(null);
+  const rafPinchRef = useRef<number | null>(null);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -386,15 +400,33 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
         const midY = (p1.clientY + p2.clientY) / 2;
         const rect = container.getBoundingClientRect();
 
+        const focalX = midX - rect.left;
+        const focalY = midY - rect.top;
+        const focalContentX = container.scrollLeft + focalX;
+        const focalContentY = container.scrollTop + focalY;
+
         pinchRef.current = {
           active: true,
           startDist: Math.max(10, dist),
           startZoom: zoomLevelRef.current,
-          centerX: midX - rect.left,
-          centerY: midY - rect.top,
-          startScrollLeft: container.scrollLeft,
-          startScrollTop: container.scrollTop,
+          focalX,
+          focalY,
+          focalContentX,
+          focalContentY,
+          startMidX: midX,
+          startMidY: midY,
+          currentScale: 1,
+          panX: 0,
+          panY: 0,
         };
+
+        const wrapper = contentWrapperRef.current;
+        if (wrapper) {
+          wrapper.style.transformOrigin = `${focalContentX}px ${focalContentY}px`;
+          wrapper.style.willChange = 'transform';
+          wrapper.style.transition = 'none';
+        }
+        container.style.scrollBehavior = 'auto';
       }
     };
 
@@ -404,29 +436,100 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
         const p1 = e.touches[0];
         const p2 = e.touches[1];
         const dist = Math.hypot(p1.clientX - p2.clientX, p1.clientY - p2.clientY);
-        const scale = dist / pinchRef.current.startDist;
-        const newZoom = Math.min(
-          250,
-          Math.max(35, Math.round(pinchRef.current.startZoom * scale))
-        );
+        const rawScale = dist / pinchRef.current.startDist;
+        const startZoom = pinchRef.current.startZoom;
 
-        if (newZoom !== zoomLevelRef.current) {
-          setIsFitWidthMode(false);
-          const zoomRatio = newZoom / pinchRef.current.startZoom;
-          container.scrollLeft =
-            (pinchRef.current.startScrollLeft + pinchRef.current.centerX) * zoomRatio -
-            pinchRef.current.centerX;
-          container.scrollTop =
-            (pinchRef.current.startScrollTop + pinchRef.current.centerY) * zoomRatio -
-            pinchRef.current.centerY;
-          setZoomLevel(newZoom);
+        // Clamp scale so effective zoom stays cleanly within bounds [35%, 250%]
+        const minScale = 35 / startZoom;
+        const maxScale = 250 / startZoom;
+        const scale = Math.min(maxScale, Math.max(minScale, rawScale));
+
+        const midX = (p1.clientX + p2.clientX) / 2;
+        const midY = (p1.clientY + p2.clientY) / 2;
+        const panX = midX - pinchRef.current.startMidX;
+        const panY = midY - pinchRef.current.startMidY;
+
+        pinchRef.current.currentScale = scale;
+        pinchRef.current.panX = panX;
+        pinchRef.current.panY = panY;
+
+        // Apply hardware-accelerated GPU transform on animation frame (zero React re-renders during gesture)
+        if (!rafPinchRef.current) {
+          rafPinchRef.current = requestAnimationFrame(() => {
+            rafPinchRef.current = null;
+            if (!pinchRef.current.active) return;
+            const wrapper = contentWrapperRef.current;
+            if (wrapper) {
+              const s = pinchRef.current.currentScale;
+              const px = pinchRef.current.panX;
+              const py = pinchRef.current.panY;
+              wrapper.style.transform = `translate3d(${px}px, ${py}px, 0) scale(${s})`;
+            }
+            if (zoomPillRef.current) {
+              const livePercent = Math.round(startZoom * pinchRef.current.currentScale);
+              zoomPillRef.current.textContent = `${livePercent}%`;
+              zoomPillRef.current.style.opacity = '1';
+            }
+          });
         }
       }
     };
 
     const handleTouchEnd = (e: TouchEvent) => {
-      if (e.touches.length < 2) {
+      if (e.touches.length < 2 && pinchRef.current.active) {
         pinchRef.current.active = false;
+        if (rafPinchRef.current) {
+          cancelAnimationFrame(rafPinchRef.current);
+          rafPinchRef.current = null;
+        }
+
+        if (zoomPillRef.current) {
+          zoomPillRef.current.style.opacity = '0';
+        }
+
+        const wrapper = contentWrapperRef.current;
+        const {
+          startZoom,
+          currentScale,
+          focalX,
+          focalY,
+          focalContentX,
+          focalContentY,
+          panX,
+          panY,
+        } = pinchRef.current;
+
+        const rawFinalZoom = Math.round(startZoom * currentScale);
+        const finalZoom = Math.min(250, Math.max(35, rawFinalZoom));
+
+        if (wrapper) {
+          wrapper.style.transform = 'none';
+          wrapper.style.transformOrigin = '';
+          wrapper.style.willChange = '';
+          wrapper.style.transition = '';
+        }
+        container.style.scrollBehavior = '';
+
+        if (Math.abs(finalZoom - startZoom) >= 2) {
+          setIsFitWidthMode(false);
+          const zoomRatio = finalZoom / startZoom;
+          const targetScrollLeft = Math.max(
+            0,
+            Math.round(focalContentX * zoomRatio - focalX - panX)
+          );
+          const targetScrollTop = Math.max(
+            0,
+            Math.round(focalContentY * zoomRatio - focalY - panY)
+          );
+
+          setZoomLevel(finalZoom);
+
+          // Position scroll accurately once React finishes layout
+          requestAnimationFrame(() => {
+            container.scrollLeft = targetScrollLeft;
+            container.scrollTop = targetScrollTop;
+          });
+        }
       }
     };
 
@@ -435,7 +538,7 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
       if (e.ctrlKey) {
         e.preventDefault();
         const currentZoom = zoomLevelRef.current;
-        const factor = -e.deltaY * 0.4;
+        const factor = -e.deltaY * 0.35;
         const newZoom = Math.min(250, Math.max(35, Math.round(currentZoom + factor)));
         if (newZoom !== currentZoom) {
           setIsFitWidthMode(false);
@@ -455,23 +558,61 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
       e.preventDefault();
       pinchRef.current.active = true;
       pinchRef.current.startZoom = zoomLevelRef.current;
+      pinchRef.current.currentScale = 1;
+      const rect = container.getBoundingClientRect();
+      const focalX = (e.clientX || rect.width / 2) - rect.left;
+      const focalY = (e.clientY || rect.height / 2) - rect.top;
+      pinchRef.current.focalX = focalX;
+      pinchRef.current.focalY = focalY;
+      pinchRef.current.focalContentX = container.scrollLeft + focalX;
+      pinchRef.current.focalContentY = container.scrollTop + focalY;
+
+      const wrapper = contentWrapperRef.current;
+      if (wrapper) {
+        wrapper.style.transformOrigin = `${pinchRef.current.focalContentX}px ${pinchRef.current.focalContentY}px`;
+        wrapper.style.willChange = 'transform';
+        wrapper.style.transition = 'none';
+      }
     };
 
     const handleGestureChange = (e: any) => {
       e.preventDefault();
       if (pinchRef.current.active) {
-        setIsFitWidthMode(false);
-        const newZoom = Math.min(
-          250,
-          Math.max(35, Math.round(pinchRef.current.startZoom * e.scale))
-        );
-        setZoomLevel(newZoom);
+        const startZoom = pinchRef.current.startZoom;
+        const scale = Math.min(250 / startZoom, Math.max(35 / startZoom, e.scale));
+        pinchRef.current.currentScale = scale;
+        const wrapper = contentWrapperRef.current;
+        if (wrapper) {
+          wrapper.style.transform = `scale(${scale})`;
+        }
+        if (zoomPillRef.current) {
+          zoomPillRef.current.textContent = `${Math.round(startZoom * scale)}%`;
+          zoomPillRef.current.style.opacity = '1';
+        }
       }
     };
 
     const handleGestureEnd = (e: any) => {
       e.preventDefault();
-      pinchRef.current.active = false;
+      if (pinchRef.current.active) {
+        pinchRef.current.active = false;
+        if (zoomPillRef.current) zoomPillRef.current.style.opacity = '0';
+        const wrapper = contentWrapperRef.current;
+        if (wrapper) {
+          wrapper.style.transform = 'none';
+          wrapper.style.transformOrigin = '';
+          wrapper.style.willChange = '';
+          wrapper.style.transition = '';
+        }
+        const finalZoom = Math.min(
+          250,
+          Math.max(35, Math.round(pinchRef.current.startZoom * (pinchRef.current.currentScale || 1)))
+        );
+        if (Math.abs(finalZoom - pinchRef.current.startZoom) >= 2) {
+          setIsFitWidthMode(false);
+          setZoomLevel(finalZoom);
+        }
+      }
     };
 
     container.addEventListener('touchstart', handleTouchStart, { passive: false });
@@ -633,6 +774,15 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
 
   return (
     <div className="flex flex-col flex-1 h-full min-h-0 bg-slate-100 relative">
+      {/* Real-time floating zoom pill badge during pinch gestures */}
+      <div
+        ref={zoomPillRef}
+        className="fixed top-16 sm:top-20 left-1/2 -translate-x-1/2 z-50 pointer-events-none bg-slate-900/90 text-white text-xs font-mono font-semibold px-3.5 py-1.5 rounded-full shadow-lg border border-slate-700/60 backdrop-blur-sm opacity-0 transition-opacity duration-150 flex items-center gap-2 select-none"
+      >
+        <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
+        <span>100%</span>
+      </div>
+
       {/* Top Floating Page Navigation & Zoom Toolbar (hidden in Reader Mode) */}
       {!isReaderMode && (
         <div className="shrink-0 bg-white/95 backdrop-blur border-b border-slate-200 px-2.5 sm:px-6 py-1.5 sm:py-2 flex items-center justify-between gap-1.5 sm:gap-2 shadow-xs z-30 overflow-x-auto no-scrollbar">
@@ -1006,7 +1156,10 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
           </div>
         ) : (
           /* Continuous Vertical Page Roll Stack - Seamless downward scrolling without manual boundary stops */
-          <div className="w-fit min-w-full min-h-full flex flex-col items-center justify-start p-4 sm:p-8 pb-32 space-y-6">
+          <div
+            ref={contentWrapperRef}
+            className="w-fit min-w-full min-h-full flex flex-col items-center justify-start p-4 sm:p-8 pb-32 space-y-6"
+          >
             {Array.from({ length: pdfState.numPages }, (_, i) => i + 1).map((pageNum) => (
               <div
                 key={pageNum}

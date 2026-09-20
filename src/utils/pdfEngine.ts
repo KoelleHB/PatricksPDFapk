@@ -211,21 +211,23 @@ export async function renderPdfPageToCanvas(
     const initialViewport = page.getViewport({ scale: 1.0 });
     const viewport = page.getViewport({ scale: scaleMultiplier });
 
-    canvas.width = viewport.width;
-    canvas.height = viewport.height;
+    // Render onto an off-screen buffer first to eliminate white-flashing, layout jumps, and flickering
+    const offscreen = document.createElement('canvas');
+    offscreen.width = Math.round(viewport.width);
+    offscreen.height = Math.round(viewport.height);
 
-    const ctx = canvas.getContext('2d');
-    if (!ctx) throw new Error('Could not get canvas context');
+    const offCtx = offscreen.getContext('2d');
+    if (!offCtx) throw new Error('Could not get offscreen canvas context');
 
     // Pre-paint a solid white background: Adobe Acrobat documents and annotations
     // expect an opaque white base to prevent inverted colors, dark backgrounds, or transparency anomalies
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    offCtx.fillStyle = '#ffffff';
+    offCtx.fillRect(0, 0, offscreen.width, offscreen.height);
 
     // Render with ENABLE_FORMS to render Adobe Acrobat interactive forms, stamps, and appearance streams
     const annotationMode = (pdfjsLib as any).AnnotationMode?.ENABLE_FORMS ?? 2;
     const renderContext = {
-      canvasContext: ctx,
+      canvasContext: offCtx,
       viewport: viewport,
       intent: 'display',
       annotationMode: annotationMode,
@@ -245,10 +247,10 @@ export async function renderPdfPageToCanvas(
       // fallback to basic page rendering without annotations to ensure user can still view the page
       console.warn('Annotation rendering encountered an issue, falling back to base page render:', err);
       if (pipeline.currentSessionId === thisSessionId) {
-        ctx.fillStyle = '#ffffff';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        offCtx.fillStyle = '#ffffff';
+        offCtx.fillRect(0, 0, offscreen.width, offscreen.height);
         const fallbackRenderContext = {
-          canvasContext: ctx,
+          canvasContext: offCtx,
           viewport: viewport,
           intent: 'display',
           annotationMode: (pdfjsLib as any).AnnotationMode?.DISABLE ?? 0,
@@ -267,6 +269,15 @@ export async function renderPdfPageToCanvas(
 
     if (pipeline.currentSessionId !== thisSessionId) {
       return null;
+    }
+
+    // Atomically transfer the off-screen buffer onto the on-screen canvas in a single paint frame.
+    // The previous canvas pixels stay visible until this exact call, ensuring zero white frames or visual tearing.
+    canvas.width = offscreen.width;
+    canvas.height = offscreen.height;
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      ctx.drawImage(offscreen, 0, 0);
     }
 
     return {
@@ -309,22 +320,15 @@ export async function renderPdfTextLayer(
 
     const textContent = await page.getTextContent();
 
-    if ((pdfjsLib as any).TextLayer) {
-      const textLayer = new (pdfjsLib as any).TextLayer({
+    const TextLayerClass = (pdfjsLib as any).TextLayer;
+    if (TextLayerClass) {
+      const textLayer = new TextLayerClass({
         textContentSource: textContent,
         container,
         viewport,
       });
       await textLayer.render();
       return textLayer;
-    } else if (typeof (pdfjsLib as any).renderTextLayer === 'function') {
-      const task = (pdfjsLib as any).renderTextLayer({
-        textContentSource: textContent,
-        container,
-        viewport,
-      });
-      await task.promise;
-      return task;
     }
   } catch (err: any) {
     if (err?.name !== 'RenderingCancelledException') {
