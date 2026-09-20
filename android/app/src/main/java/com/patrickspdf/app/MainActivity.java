@@ -125,6 +125,7 @@ public class MainActivity extends BridgeActivity {
                                     }
                                     PrintDocumentInfo info = new PrintDocumentInfo.Builder(docTitle)
                                             .setContentType(PrintDocumentInfo.CONTENT_TYPE_DOCUMENT)
+                                            .setPageCount(PrintDocumentInfo.PAGE_COUNT_UNKNOWN)
                                             .build();
                                     callback.onLayoutFinished(info, true);
                                 }
@@ -145,7 +146,7 @@ public class MainActivity extends BridgeActivity {
                             };
 
                             PrintAttributes attributes = new PrintAttributes.Builder()
-                                    .setContentType(PrintAttributes.CONTENT_TYPE_DOCUMENT)
+                                    .setMediaSize(PrintAttributes.MediaSize.ISO_A4)
                                     .build();
 
                             printManager.print(docTitle, adapter, attributes);
