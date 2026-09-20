@@ -147,4 +147,28 @@ export interface PdfOutlineItem {
   items?: PdfOutlineItem[];
 }
 
+export interface RecentDocumentRecord {
+  id: string;
+  name: string;
+  fileSize: number;
+  numPages: number;
+  lastOpened: number;
+  thumbnailDataUrl?: string;
+  pdfBuffer: ArrayBuffer;
+  signatureCount?: number;
+  textCount?: number;
+}
+
+declare global {
+  interface Window {
+    NativePdfBridge?: {
+      getPendingPdf?: () => string | null;
+      isNativeBridge?: () => boolean;
+      sharePdf?: (fileName: string, base64Data: string) => boolean;
+      printPdf?: (documentName: string, base64Data: string) => boolean;
+    };
+    onNativePdfReceived?: (data: { name: string; base64: string }) => void;
+  }
+}
+
 

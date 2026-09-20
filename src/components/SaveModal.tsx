@@ -2,13 +2,16 @@ import React, { useState, useEffect } from 'react';
 import {
   Download,
   Share2,
+  Printer,
   X,
   FileCheck,
   Loader2,
   ExternalLink,
+  Check,
 } from 'lucide-react';
 import { SignatureItem, TextOverlayItem, FormValuesState, PdfDocumentState } from '../types';
 import { embedSignaturesIntoPdf } from '../utils/pdfEngine';
+import { sharePdfDocument, printPdfDocument, isNativeAndroid } from '../utils/nativeBridge';
 
 export interface SaveModalProps {
   isOpen: boolean;
@@ -97,6 +100,9 @@ export const SaveModal: React.FC<SaveModalProps> = ({
 
   if (!isOpen) return null;
 
+  const [isPrinting, setIsPrinting] = useState(false);
+  const [isSharing, setIsSharing] = useState(false);
+
   const handleDownload = () => {
     if (!pdfUrl) return;
     const a = document.createElement('a');
@@ -111,29 +117,36 @@ export const SaveModal: React.FC<SaveModalProps> = ({
 
   const handleNativeShare = async () => {
     if (!pdfBlob) return;
-
+    setIsSharing(true);
     try {
-      const file = new File([pdfBlob], fileName || 'signed-document.pdf', {
-        type: 'application/pdf',
-      });
-
-      if (navigator.canShare && navigator.canShare({ files: [file] })) {
-        await navigator.share({
-          files: [file],
-          title: fileName,
-          text: 'Here is the signed PDF document.',
-        });
+      const res = await sharePdfDocument(fileName || 'signed-document.pdf', pdfBlob);
+      if (res.success) {
         notifySuccess();
         onClose();
-      } else {
-        handleDownload();
       }
     } catch (err) {
-      console.log('Share dismissed or failed:', err);
+      console.warn('Share error in modal:', err);
+    } finally {
+      setIsSharing(false);
     }
   };
 
-  const canShare = typeof navigator !== 'undefined' && !!navigator.share;
+  const handlePrint = async () => {
+    if (!pdfBlob) return;
+    setIsPrinting(true);
+    try {
+      const res = await printPdfDocument(fileName || 'signed-document.pdf', pdfBlob);
+      if (res.success) {
+        notifySuccess();
+      }
+    } catch (err) {
+      console.warn('Print error in modal:', err);
+    } finally {
+      setIsPrinting(false);
+    }
+  };
+
+  const isAndroid = isNativeAndroid();
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-3 sm:p-4">
@@ -298,29 +311,48 @@ export const SaveModal: React.FC<SaveModalProps> = ({
                   className="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-semibold text-sm shadow-md transition cursor-pointer"
                 >
                   <Download className="w-4 h-4" />
-                  <span>Save PDF</span>
+                  <span>PDF speichern / Download</span>
                 </button>
 
-                {canShare && (
+                <div className="grid grid-cols-2 gap-2">
                   <button
                     id="modal-share-btn"
                     onClick={handleNativeShare}
-                    className="w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-medium text-sm transition cursor-pointer"
+                    disabled={isSharing}
+                    className="flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-medium text-xs sm:text-sm transition cursor-pointer disabled:opacity-50"
                   >
-                    <Share2 className="w-4 h-4 text-emerald-400" />
-                    <span>Save & Share on Android</span>
+                    {isSharing ? (
+                      <Loader2 className="w-4 h-4 animate-spin text-emerald-400" />
+                    ) : (
+                      <Share2 className="w-4 h-4 text-emerald-400" />
+                    )}
+                    <span>{isAndroid ? 'Android Share' : 'Teilen'}</span>
                   </button>
-                )}
+
+                  <button
+                    id="modal-print-btn"
+                    onClick={handlePrint}
+                    disabled={isPrinting}
+                    className="flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl border border-slate-300 hover:bg-slate-100 text-slate-800 font-medium text-xs sm:text-sm transition cursor-pointer disabled:opacity-50"
+                  >
+                    {isPrinting ? (
+                      <Loader2 className="w-4 h-4 animate-spin text-blue-600" />
+                    ) : (
+                      <Printer className="w-4 h-4 text-blue-600" />
+                    )}
+                    <span>{isAndroid ? 'Android Print' : 'Drucken'}</span>
+                  </button>
+                </div>
 
                 {pdfUrl && (
                   <a
                     href={pdfUrl}
                     target="_blank"
                     rel="noreferrer"
-                    className="w-full flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl border border-slate-200 text-slate-700 hover:bg-slate-100 text-xs font-medium transition"
+                    className="w-full flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-100 text-xs font-medium transition"
                   >
                     <ExternalLink className="w-3.5 h-3.5" />
-                    <span>Open in Browser Tab for Inspection</span>
+                    <span>In neuem Tab prüfen</span>
                   </a>
                 )}
               </div>

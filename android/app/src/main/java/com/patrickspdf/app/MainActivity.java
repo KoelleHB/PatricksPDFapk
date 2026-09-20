@@ -1,20 +1,32 @@
 package com.patrickspdf.app;
 
+import android.content.Context;
 import android.content.Intent;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.CancellationSignal;
+import android.os.ParcelFileDescriptor;
+import android.print.PageRange;
+import android.print.PrintAttributes;
+import android.print.PrintDocumentAdapter;
+import android.print.PrintDocumentInfo;
+import android.print.PrintManager;
 import android.provider.OpenableColumns;
 import android.util.Base64;
 import android.util.Log;
 import android.webkit.JavascriptInterface;
 
+import androidx.core.content.FileProvider;
 import com.getcapacitor.BridgeActivity;
 
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.util.ArrayList;
 
 public class MainActivity extends BridgeActivity {
@@ -33,6 +45,120 @@ public class MainActivity extends BridgeActivity {
             String res = activity.pendingPdfJson;
             activity.pendingPdfJson = null;
             return res;
+        }
+
+        @JavascriptInterface
+        public boolean isNativeBridge() {
+            return true;
+        }
+
+        @JavascriptInterface
+        public boolean sharePdf(String fileName, String base64Data) {
+            try {
+                if (fileName == null || fileName.trim().isEmpty()) {
+                    fileName = "document.pdf";
+                }
+                if (!fileName.toLowerCase().endsWith(".pdf")) {
+                    fileName += ".pdf";
+                }
+                byte[] pdfBytes = Base64.decode(base64Data, Base64.DEFAULT);
+
+                File cacheDir = activity.getCacheDir();
+                File sharedDir = new File(cacheDir, "shared_pdfs");
+                if (!sharedDir.exists()) {
+                    sharedDir.mkdirs();
+                }
+                File file = new File(sharedDir, fileName);
+                try (FileOutputStream fos = new FileOutputStream(file)) {
+                    fos.write(pdfBytes);
+                    fos.flush();
+                }
+
+                Uri contentUri = FileProvider.getUriForFile(
+                        activity,
+                        activity.getPackageName() + ".fileprovider",
+                        file
+                );
+
+                Intent shareIntent = new Intent(Intent.ACTION_SEND);
+                shareIntent.setType("application/pdf");
+                shareIntent.putExtra(Intent.EXTRA_STREAM, contentUri);
+                shareIntent.putExtra(Intent.EXTRA_SUBJECT, fileName);
+                shareIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+
+                Intent chooser = Intent.createChooser(shareIntent, "PDF teilen / Share PDF");
+                chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                activity.startActivity(chooser);
+                return true;
+            } catch (Exception e) {
+                Log.e(TAG, "Error sharing PDF via native bridge: " + e.getMessage(), e);
+                return false;
+            }
+        }
+
+        @JavascriptInterface
+        public boolean printPdf(final String documentName, final String base64Data) {
+            try {
+                final String docTitle = (documentName == null || documentName.trim().isEmpty())
+                        ? "Document.pdf"
+                        : documentName;
+                final byte[] pdfBytes = Base64.decode(base64Data, Base64.DEFAULT);
+
+                activity.runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            PrintManager printManager = (PrintManager) activity.getSystemService(Context.PRINT_SERVICE);
+                            if (printManager == null) {
+                                Log.e(TAG, "PrintManager service not available");
+                                return;
+                            }
+
+                            PrintDocumentAdapter adapter = new PrintDocumentAdapter() {
+                                @Override
+                                public void onLayout(PrintAttributes oldAttributes, PrintAttributes newAttributes,
+                                                     CancellationSignal cancellationSignal,
+                                                     LayoutResultCallback callback, Bundle extras) {
+                                    if (cancellationSignal.isCanceled()) {
+                                        callback.onLayoutCancelled();
+                                        return;
+                                    }
+                                    PrintDocumentInfo info = new PrintDocumentInfo.Builder(docTitle)
+                                            .setContentType(PrintDocumentInfo.CONTENT_TYPE_DOCUMENT)
+                                            .build();
+                                    callback.onLayoutFinished(info, true);
+                                }
+
+                                @Override
+                                public void onWrite(PageRange[] pages, ParcelFileDescriptor destination,
+                                                     CancellationSignal cancellationSignal,
+                                                     WriteResultCallback callback) {
+                                    try (OutputStream out = new FileOutputStream(destination.getFileDescriptor())) {
+                                        out.write(pdfBytes);
+                                        out.flush();
+                                        callback.onWriteFinished(new PageRange[]{PageRange.ALL_PAGES});
+                                    } catch (Exception e) {
+                                        Log.e(TAG, "Error writing PDF to print spooler: " + e.getMessage(), e);
+                                        callback.onWriteFailed(e.getMessage());
+                                    }
+                                }
+                            };
+
+                            PrintAttributes attributes = new PrintAttributes.Builder()
+                                    .setContentType(PrintAttributes.CONTENT_TYPE_DOCUMENT)
+                                    .build();
+
+                            printManager.print(docTitle, adapter, attributes);
+                        } catch (Exception e) {
+                            Log.e(TAG, "Failed launching PrintManager: " + e.getMessage(), e);
+                        }
+                    }
+                });
+                return true;
+            } catch (Exception e) {
+                Log.e(TAG, "Error in printPdf: " + e.getMessage(), e);
+                return false;
+            }
         }
     }
 

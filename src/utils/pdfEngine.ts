@@ -1425,6 +1425,46 @@ export async function extractDocumentOutline(
   }
 }
 
+/**
+ * Generates a lightweight JPEG data URL thumbnail of a specific page for recent documents and page overviews.
+ */
+export async function generatePageThumbnail(
+  data: ArrayBuffer,
+  pageNumber: number = 1,
+  maxWidth: number = 180,
+  password?: string
+): Promise<string | null> {
+  try {
+    const pdfDoc = await loadPdfJsDoc(data, password);
+    const targetPage = Math.min(Math.max(1, pageNumber), pdfDoc.numPages);
+    const page = await pdfDoc.getPage(targetPage);
+    const unscaledViewport = page.getViewport({ scale: 1.0 });
+    const scale = maxWidth / unscaledViewport.width;
+    const viewport = page.getViewport({ scale });
+
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(viewport.width);
+    canvas.height = Math.round(viewport.height);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    await page.render({
+      canvasContext: ctx,
+      viewport,
+      intent: 'display',
+      background: 'rgba(255, 255, 255, 1)',
+    }).promise;
+
+    return canvas.toDataURL('image/jpeg', 0.85);
+  } catch (err) {
+    console.warn('Failed to generate page thumbnail:', err);
+    return null;
+  }
+}
+
 
 
 

@@ -9,8 +9,11 @@ import { GeneralSetupGuideModal } from './components/GeneralSetupGuideModal';
 import { PasswordPromptModal } from './components/PasswordPromptModal';
 import { PageManagementModal } from './components/PageManagementModal';
 import { MobileBottomBar } from './components/MobileBottomBar';
-import { SignatureItem, TextOverlayItem, FormFieldItem, FormValuesState, PdfDocumentState, TextFontFamily, TextColor, PageSpec } from './types';
-import { loadPdfJsDoc, extractPdfFormFields, applyPageModifications, clearThumbnailCache } from './utils/pdfEngine';
+import { RecentDocumentsModal } from './components/RecentDocumentsModal';
+import { SignatureItem, TextOverlayItem, FormFieldItem, FormValuesState, PdfDocumentState, TextFontFamily, TextColor, PageSpec, RecentDocumentRecord } from './types';
+import { loadPdfJsDoc, extractPdfFormFields, applyPageModifications, clearThumbnailCache, generatePageThumbnail, embedSignaturesIntoPdf } from './utils/pdfEngine';
+import { getRecentDocuments, saveRecentDocument, removeRecentDocument, clearRecentDocuments } from './utils/recentDocuments';
+import { sharePdfDocument, printPdfDocument } from './utils/nativeBridge';
 import { useDocumentHistory } from './hooks/useDocumentHistory';
 import { AlertCircle, X, Loader2, Share2, FileQuestion, HelpCircle } from 'lucide-react';
 import { UnsavedChangesModal } from './components/UnsavedChangesModal';
@@ -111,6 +114,18 @@ export default function App() {
   } | null>(null);
   const [isUnsavedModalOpen, setIsUnsavedModalOpen] = useState(false);
 
+  // Local Document History (Zuletzt geöffnet)
+  const [recentDocs, setRecentDocs] = useState<RecentDocumentRecord[]>([]);
+  const [isRecentModalOpen, setIsRecentModalOpen] = useState(false);
+  const [isQuickProcessing, setIsQuickProcessing] = useState(false);
+
+  // Load recent documents on initial mount
+  useEffect(() => {
+    getRecentDocuments()
+      .then((docs) => setRecentDocs(docs))
+      .catch((err) => console.warn('Failed to load recent documents:', err));
+  }, []);
+
   // Modals state
   const [isSignatureModalOpen, setIsSignatureModalOpen] = useState(false);
   const [isTextModalOpen, setIsTextModalOpen] = useState(false);
@@ -169,6 +184,20 @@ export default function App() {
       setPasswordPendingDoc(null);
       setHasPageModifications(false);
       setIsSaved(true);
+
+      // Asynchronously generate page 1 thumbnail and save to local document history
+      generatePageThumbnail(arrayBuffer, 1, 160, password)
+        .then(async (thumbnail) => {
+          await saveRecentDocument({
+            name: file.name,
+            buffer: arrayBuffer,
+            numPages: pdfJsDoc.numPages,
+            thumbnailDataUrl: thumbnail || undefined,
+          });
+          const updatedRecent = await getRecentDocuments();
+          setRecentDocs(updatedRecent);
+        })
+        .catch((err) => console.warn('Recent doc thumbnail save warning:', err));
     } catch (err: any) {
       console.error('Error loading PDF file:', err);
 
@@ -837,6 +866,78 @@ export default function App() {
     }
   };
 
+  // Recent Documents Actions
+  const handleSelectRecentDoc = (record: RecentDocumentRecord) => {
+    const file = new File([record.pdfBuffer], record.name, {
+      type: 'application/pdf',
+    });
+    handleRequestFileSelect(file);
+  };
+
+  const handleRemoveRecentDoc = async (id: string) => {
+    await removeRecentDocument(id);
+    const updated = await getRecentDocuments();
+    setRecentDocs(updated);
+  };
+
+  const handleClearAllRecentDocs = async () => {
+    await clearRecentDocuments();
+    setRecentDocs([]);
+  };
+
+  const handlePrintRecentDoc = async (record: RecentDocumentRecord) => {
+    await printPdfDocument(record.name, record.pdfBuffer);
+  };
+
+  const handleShareRecentDoc = async (record: RecentDocumentRecord) => {
+    await sharePdfDocument(record.name, record.pdfBuffer);
+  };
+
+  // Helper to compile current modified document (signatures, text overlays, form values)
+  const generateCurrentCompositePdf = async (): Promise<Uint8Array | null> => {
+    if (!pdfState || !pdfState.arrayBuffer) return null;
+    try {
+      return await embedSignaturesIntoPdf(
+        pdfState.arrayBuffer,
+        signatures,
+        textOverlays,
+        formValues,
+        { flattenForm: true } // flatten for reliable printing / sharing
+      );
+    } catch (err) {
+      console.error('Error generating composite PDF for print/share:', err);
+      return new Uint8Array(pdfState.arrayBuffer);
+    }
+  };
+
+  // Quick Print active document via Android PrintManager / Browser Spooler
+  const handleQuickPrint = async () => {
+    if (!pdfState) return;
+    setIsQuickProcessing(true);
+    try {
+      const bytes = await generateCurrentCompositePdf();
+      if (bytes) {
+        await printPdfDocument(pdfState.name, bytes);
+      }
+    } finally {
+      setIsQuickProcessing(false);
+    }
+  };
+
+  // Quick Share active document via Android Share Sheet / Web Share
+  const handleQuickShare = async () => {
+    if (!pdfState) return;
+    setIsQuickProcessing(true);
+    try {
+      const bytes = await generateCurrentCompositePdf();
+      if (bytes) {
+        await sharePdfDocument(pdfState.name, bytes);
+      }
+    } finally {
+      setIsQuickProcessing(false);
+    }
+  };
+
   // Apply page management changes (add, delete, reorder, and 90° rotations)
   const handleApplyPageModifications = async (newPages: PageSpec[]) => {
     if (!pdfState || !pdfState.arrayBuffer) return;
@@ -930,9 +1031,13 @@ export default function App() {
           signatureCount={signatures.length}
           hasUnsavedChanges={hasUnsavedChanges}
           hasPageModifications={hasPageModifications}
+          recentCount={recentDocs.length}
           onOpenSetupGuide={() => setIsSetupGuideModalOpen(true)}
           onOpenSave={() => setIsSaveModalOpen(true)}
           onOpenPageManager={() => setIsPageManagerOpen(true)}
+          onOpenRecent={() => setIsRecentModalOpen(true)}
+          onQuickPrint={handleQuickPrint}
+          onQuickShare={handleQuickShare}
           onFileSelect={handleRequestFileSelect}
           onCloseDocument={handleRequestCloseDocument}
         />
@@ -1016,7 +1121,14 @@ export default function App() {
         )}
 
         {!pdfState ? (
-          <EmptyState onFileSelect={handleFileSelect} />
+          <EmptyState
+            onFileSelect={handleFileSelect}
+            recentDocs={recentDocs}
+            onSelectRecentDoc={handleSelectRecentDoc}
+            onOpenRecentModal={() => setIsRecentModalOpen(true)}
+            onPrintRecentDoc={handlePrintRecentDoc}
+            onShareRecentDoc={handleShareRecentDoc}
+          />
         ) : (
           <PdfViewer
             pdfState={pdfState}
@@ -1102,9 +1214,21 @@ export default function App() {
           onSaveSuccess={() => {
             setIsSaved(true);
             setHasPageModifications(false);
+            getRecentDocuments().then(setRecentDocs).catch(() => {});
           }}
         />
       )}
+
+      {/* Recent Documents History Modal */}
+      <RecentDocumentsModal
+        isOpen={isRecentModalOpen}
+        onClose={() => setIsRecentModalOpen(false)}
+        recentDocs={recentDocs}
+        currentDocName={pdfState?.name}
+        onSelectDoc={handleSelectRecentDoc}
+        onRemoveDoc={handleRemoveRecentDoc}
+        onClearAll={handleClearAllRecentDocs}
+      />
 
       <GeneralSetupGuideModal
         isOpen={isSetupGuideModalOpen}

@@ -1,5 +1,16 @@
 import React, { useState, useRef } from 'react';
-import { FileSignature, Download, Wifi, WifiOff, HelpCircle, FolderOpen, X, LayoutGrid } from 'lucide-react';
+import {
+  FileSignature,
+  Download,
+  Wifi,
+  WifiOff,
+  HelpCircle,
+  FolderOpen,
+  X,
+  History,
+  Printer,
+  Share2,
+} from 'lucide-react';
 
 interface HeaderProps {
   documentName: string;
@@ -7,10 +18,14 @@ interface HeaderProps {
   signatureCount: number;
   hasUnsavedChanges?: boolean;
   hasPageModifications?: boolean;
+  recentCount?: number;
   onOpenSetupGuide: () => void;
   onOpenSave?: () => void;
   onOpenExport?: () => void;
   onOpenPageManager?: () => void;
+  onOpenRecent?: () => void;
+  onQuickPrint?: () => void;
+  onQuickShare?: () => void;
   onFileSelect?: (file: File) => void;
   onCloseDocument?: () => void;
 }
@@ -21,10 +36,14 @@ export const Header: React.FC<HeaderProps> = ({
   signatureCount,
   hasUnsavedChanges = false,
   hasPageModifications = false,
+  recentCount = 0,
   onOpenSetupGuide,
   onOpenSave,
   onOpenExport,
   onOpenPageManager,
+  onOpenRecent,
+  onQuickPrint,
+  onQuickShare,
   onFileSelect,
   onCloseDocument,
 }) => {
@@ -109,6 +128,53 @@ export const Header: React.FC<HeaderProps> = ({
             {isOnline ? <Wifi className="w-3.5 h-3.5 text-slate-500" /> : <WifiOff className="w-3.5 h-3.5 text-amber-600" />}
             <span>{isOnline ? 'Local' : 'Offline'}</span>
           </div>
+
+          {/* Verlauf / Recent Documents button */}
+          {onOpenRecent && (
+            <button
+              id="header-recent-btn"
+              onClick={onOpenRecent}
+              className="flex items-center gap-1.5 px-2 sm:px-2.5 py-1.5 rounded-lg border border-slate-200 text-xs sm:text-sm font-medium text-slate-700 hover:bg-slate-100 active:bg-slate-200 transition shrink-0"
+              title="Zuletzt geöffnete Dokumente"
+              aria-label="Verlauf"
+            >
+              <History className="w-4 h-4 text-slate-600 shrink-0" />
+              <span className="hidden md:inline">Verlauf</span>
+              {recentCount > 0 && (
+                <span className="px-1.5 py-0.2 text-[10px] font-bold rounded-full bg-blue-100 text-blue-700">
+                  {recentCount}
+                </span>
+              )}
+            </button>
+          )}
+
+          {/* Quick Print Button */}
+          {hasDocument && onQuickPrint && (
+            <button
+              id="header-print-btn"
+              onClick={onQuickPrint}
+              className="hidden sm:flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 text-xs sm:text-sm font-medium text-slate-700 hover:bg-slate-100 active:bg-slate-200 transition shrink-0"
+              title="Dokument drucken (Android Print / Spooler)"
+              aria-label="Drucken"
+            >
+              <Printer className="w-4 h-4 text-slate-600 shrink-0" />
+              <span className="hidden lg:inline">Drucken</span>
+            </button>
+          )}
+
+          {/* Quick Share Button */}
+          {hasDocument && onQuickShare && (
+            <button
+              id="header-share-btn"
+              onClick={onQuickShare}
+              className="hidden sm:flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 text-xs sm:text-sm font-medium text-slate-700 hover:bg-slate-100 active:bg-slate-200 transition shrink-0"
+              title="Dokument teilen (Android Share / Web Share)"
+              aria-label="Teilen"
+            >
+              <Share2 className="w-4 h-4 text-emerald-600 shrink-0" />
+              <span className="hidden lg:inline">Teilen</span>
+            </button>
+          )}
 
           {/* Setup Architecture & Install guide button: [?] on small screen, [? Guide] on desktop */}
           <button
