@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState, useCallback } from 'react';
 import {
   ChevronUp,
   ChevronDown,
@@ -157,6 +157,15 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
   const [isLoadingReflow, setIsLoadingReflow] = useState<boolean>(false);
   const reflowCache = useRef<Map<number, ReflowPageData>>(new Map());
 
+  // Zoom Anchor representation: pins a normalized coordinate within a page to a viewport position
+  interface ZoomAnchor {
+    pageNumber: number;
+    pctX: number;
+    pctY: number;
+    viewportX: number;
+    viewportY: number;
+  }
+
   // References to avoid stale closures in event listeners
   const zoomLevelRef = useRef<number>(zoomLevel);
   zoomLevelRef.current = zoomLevel;
@@ -171,6 +180,64 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
   onChangePageRef.current = onChangePage;
 
   const isScrollingProgrammaticallyRef = useRef(false);
+  const lastReportedPageRef = useRef<number>(pdfState.currentPage);
+  const pendingZoomAnchorRef = useRef<ZoomAnchor | null>(null);
+
+  // Capture the document page and intra-page offset at a given viewport coordinate
+  const captureZoomAnchor = useCallback((viewportX: number, viewportY: number): ZoomAnchor | null => {
+    const container = containerRef.current;
+    if (!container) return null;
+    const containerRect = container.getBoundingClientRect();
+    const absoluteTargetY = containerRect.top + viewportY;
+    const absoluteTargetX = containerRect.left + viewportX;
+
+    let targetPageNum = currentPageRef.current || 1;
+    let bestDistance = Infinity;
+
+    for (let p = 1; p <= numPagesRef.current; p++) {
+      const el = pageContainersRef.current[p];
+      if (!el) continue;
+      const r = el.getBoundingClientRect();
+      if (absoluteTargetY >= r.top && absoluteTargetY <= r.bottom) {
+        targetPageNum = p;
+        bestDistance = 0;
+        break;
+      }
+      const pageMidY = (r.top + r.bottom) / 2;
+      const dist = Math.abs(absoluteTargetY - pageMidY);
+      if (dist < bestDistance) {
+        bestDistance = dist;
+        targetPageNum = p;
+      }
+    }
+
+    const targetEl = pageContainersRef.current[targetPageNum];
+    if (!targetEl) {
+      return {
+        pageNumber: targetPageNum,
+        pctX: 0.5,
+        pctY: 0.5,
+        viewportX,
+        viewportY,
+      };
+    }
+
+    const pageRect = targetEl.getBoundingClientRect();
+    const pctX = pageRect.width > 0
+      ? Math.max(0, Math.min(1, (absoluteTargetX - pageRect.left) / pageRect.width))
+      : 0.5;
+    const pctY = pageRect.height > 0
+      ? Math.max(0, Math.min(1, (absoluteTargetY - pageRect.top) / pageRect.height))
+      : 0.5;
+
+    return {
+      pageNumber: targetPageNum,
+      pctX,
+      pctY,
+      viewportX,
+      viewportY,
+    };
+  }, []);
 
   // Automatically reset to "fit width" mode whenever a new file is opened
   const lastOpenedDocRef = useRef<string>('');
@@ -210,13 +277,18 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
     if (!isFitWidthMode) return;
 
     const handleResize = () => {
+      if (containerRef.current) {
+        const centerX = containerRef.current.clientWidth / 2;
+        const centerY = containerRef.current.clientHeight / 2;
+        pendingZoomAnchorRef.current = captureZoomAnchor(centerX, centerY);
+      }
       const fitZoom = calculateFitWidthZoom();
       setZoomLevel(fitZoom);
     };
 
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
-  }, [isFitWidthMode, calculateFitWidthZoom]);
+  }, [isFitWidthMode, calculateFitWidthZoom, captureZoomAnchor]);
 
   // Mouse pan state
   const [isMousePanning, setIsMousePanning] = useState<boolean>(false);
@@ -301,16 +373,18 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
   // Sync external page changes (e.g. Undo/Redo or page reordering)
   useEffect(() => {
     if (isScrollingProgrammaticallyRef.current) return;
+    // If this page change originated from our own scroll intersection observer, do NOT scroll!
+    if (lastReportedPageRef.current === pdfState.currentPage) {
+      return;
+    }
+    lastReportedPageRef.current = pdfState.currentPage;
     const targetEl = pageContainersRef.current[pdfState.currentPage];
     if (targetEl && containerRef.current) {
-      const containerRect = containerRef.current.getBoundingClientRect();
-      const targetRect = targetEl.getBoundingClientRect();
-      // Only scroll if outside the comfortable visible window
-      const isVisible =
-        targetRect.top < containerRect.bottom - 80 && targetRect.bottom > containerRect.top + 80;
-      if (!isVisible) {
-        targetEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      }
+      isScrollingProgrammaticallyRef.current = true;
+      targetEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      setTimeout(() => {
+        isScrollingProgrammaticallyRef.current = false;
+      }, 500);
     }
   }, [pdfState.currentPage]);
 
@@ -321,7 +395,7 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
 
     const observer = new IntersectionObserver(
       (entries) => {
-        if (isScrollingProgrammaticallyRef.current) return;
+        if (isScrollingProgrammaticallyRef.current || pinchRef.current?.active) return;
 
         let bestPage = 0;
         let maxRatio = 0;
@@ -335,6 +409,8 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
         }
 
         if (bestPage > 0 && bestPage !== currentPageRef.current) {
+          lastReportedPageRef.current = bestPage;
+          currentPageRef.current = bestPage;
           onChangePageRef.current(bestPage);
         }
       },
@@ -352,11 +428,57 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
     return () => observer.disconnect();
   }, [pdfState.numPages]);
 
+  // Restore exact scroll position after zoomLevel changes using the captured anchor
+  useLayoutEffect(() => {
+    if (!pendingZoomAnchorRef.current || !containerRef.current) return;
+    const anchor = pendingZoomAnchorRef.current;
+    pendingZoomAnchorRef.current = null;
+
+    const targetEl = pageContainersRef.current[anchor.pageNumber];
+    const container = containerRef.current;
+    if (!targetEl || !container) return;
+
+    // Suppress scroll listener and observer while adjusting position
+    isScrollingProgrammaticallyRef.current = true;
+
+    // Clear hardware transform from contentWrapper
+    const wrapper = contentWrapperRef.current;
+    if (wrapper) {
+      wrapper.style.transform = 'none';
+      wrapper.style.transformOrigin = '';
+      wrapper.style.willChange = '';
+      wrapper.style.transition = '';
+    }
+
+    const containerRect = container.getBoundingClientRect();
+    const pageRect = targetEl.getBoundingClientRect();
+
+    // Calculate delta between where the anchor point rendered and where it should be in the viewport
+    const currentAnchorScreenX = pageRect.left + anchor.pctX * pageRect.width;
+    const currentAnchorScreenY = pageRect.top + anchor.pctY * pageRect.height;
+
+    const desiredAnchorScreenX = containerRect.left + anchor.viewportX;
+    const desiredAnchorScreenY = containerRect.top + anchor.viewportY;
+
+    const deltaX = currentAnchorScreenX - desiredAnchorScreenX;
+    const deltaY = currentAnchorScreenY - desiredAnchorScreenY;
+
+    container.scrollLeft = Math.max(0, Math.round(container.scrollLeft + deltaX));
+    container.scrollTop = Math.max(0, Math.round(container.scrollTop + deltaY));
+
+    const unlockTimer = setTimeout(() => {
+      isScrollingProgrammaticallyRef.current = false;
+    }, 150);
+
+    return () => clearTimeout(unlockTimer);
+  }, [zoomLevel]);
+
   // Touch Pinch-to-Zoom, Safari Gestures, and Trackpad Ctrl+Wheel Zoom
   const pinchRef = useRef<{
     active: boolean;
     startDist: number;
     startZoom: number;
+    anchor: ZoomAnchor | null;
     focalX: number;
     focalY: number;
     focalContentX: number;
@@ -370,6 +492,7 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
     active: false,
     startDist: 0,
     startZoom: 100,
+    anchor: null,
     focalX: 0,
     focalY: 0,
     focalContentX: 0,
@@ -393,6 +516,7 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
       if (e.touches.length === 2) {
         // Two fingers: Pinch to zoom
         e.preventDefault();
+        isScrollingProgrammaticallyRef.current = true;
         const p1 = e.touches[0];
         const p2 = e.touches[1];
         const dist = Math.hypot(p1.clientX - p2.clientX, p1.clientY - p2.clientY);
@@ -405,10 +529,13 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
         const focalContentX = container.scrollLeft + focalX;
         const focalContentY = container.scrollTop + focalY;
 
+        const anchor = captureZoomAnchor(focalX, focalY);
+
         pinchRef.current = {
           active: true,
           startDist: Math.max(10, dist),
           startZoom: zoomLevelRef.current,
+          anchor,
           focalX,
           focalY,
           focalContentX,
@@ -487,14 +614,10 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
           zoomPillRef.current.style.opacity = '0';
         }
 
-        const wrapper = contentWrapperRef.current;
         const {
           startZoom,
           currentScale,
-          focalX,
-          focalY,
-          focalContentX,
-          focalContentY,
+          anchor,
           panX,
           panY,
         } = pinchRef.current;
@@ -502,33 +625,27 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
         const rawFinalZoom = Math.round(startZoom * currentScale);
         const finalZoom = Math.min(250, Math.max(35, rawFinalZoom));
 
-        if (wrapper) {
-          wrapper.style.transform = 'none';
-          wrapper.style.transformOrigin = '';
-          wrapper.style.willChange = '';
-          wrapper.style.transition = '';
-        }
         container.style.scrollBehavior = '';
 
-        if (Math.abs(finalZoom - startZoom) >= 2) {
+        if (Math.abs(finalZoom - startZoom) >= 2 && anchor) {
           setIsFitWidthMode(false);
-          const zoomRatio = finalZoom / startZoom;
-          const targetScrollLeft = Math.max(
-            0,
-            Math.round(focalContentX * zoomRatio - focalX - panX)
-          );
-          const targetScrollTop = Math.max(
-            0,
-            Math.round(focalContentY * zoomRatio - focalY - panY)
-          );
-
+          // Set the pending anchor with pan offset so useLayoutEffect restores position exactly
+          pendingZoomAnchorRef.current = {
+            ...anchor,
+            viewportX: anchor.viewportX + panX,
+            viewportY: anchor.viewportY + panY,
+          };
           setZoomLevel(finalZoom);
-
-          // Position scroll accurately once React finishes layout
-          requestAnimationFrame(() => {
-            container.scrollLeft = targetScrollLeft;
-            container.scrollTop = targetScrollTop;
-          });
+        } else {
+          // No significant zoom change: reset GPU transform
+          const wrapper = contentWrapperRef.current;
+          if (wrapper) {
+            wrapper.style.transform = 'none';
+            wrapper.style.transformOrigin = '';
+            wrapper.style.willChange = '';
+            wrapper.style.transition = '';
+          }
+          isScrollingProgrammaticallyRef.current = false;
         }
       }
     };
@@ -545,9 +662,7 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
           const rect = container.getBoundingClientRect();
           const mouseX = e.clientX - rect.left;
           const mouseY = e.clientY - rect.top;
-          const zoomRatio = newZoom / currentZoom;
-          container.scrollLeft = (container.scrollLeft + mouseX) * zoomRatio - mouseX;
-          container.scrollTop = (container.scrollTop + mouseY) * zoomRatio - mouseY;
+          pendingZoomAnchorRef.current = captureZoomAnchor(mouseX, mouseY);
           setZoomLevel(newZoom);
         }
       }
@@ -556,12 +671,16 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
     // Safari gestures
     const handleGestureStart = (e: any) => {
       e.preventDefault();
-      pinchRef.current.active = true;
-      pinchRef.current.startZoom = zoomLevelRef.current;
-      pinchRef.current.currentScale = 1;
+      isScrollingProgrammaticallyRef.current = true;
       const rect = container.getBoundingClientRect();
       const focalX = (e.clientX || rect.width / 2) - rect.left;
       const focalY = (e.clientY || rect.height / 2) - rect.top;
+      const anchor = captureZoomAnchor(focalX, focalY);
+
+      pinchRef.current.active = true;
+      pinchRef.current.startZoom = zoomLevelRef.current;
+      pinchRef.current.currentScale = 1;
+      pinchRef.current.anchor = anchor;
       pinchRef.current.focalX = focalX;
       pinchRef.current.focalY = focalY;
       pinchRef.current.focalContentX = container.scrollLeft + focalX;
@@ -597,20 +716,23 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
       if (pinchRef.current.active) {
         pinchRef.current.active = false;
         if (zoomPillRef.current) zoomPillRef.current.style.opacity = '0';
-        const wrapper = contentWrapperRef.current;
-        if (wrapper) {
-          wrapper.style.transform = 'none';
-          wrapper.style.transformOrigin = '';
-          wrapper.style.willChange = '';
-          wrapper.style.transition = '';
-        }
         const finalZoom = Math.min(
           250,
           Math.max(35, Math.round(pinchRef.current.startZoom * (pinchRef.current.currentScale || 1)))
         );
-        if (Math.abs(finalZoom - pinchRef.current.startZoom) >= 2) {
+        if (Math.abs(finalZoom - pinchRef.current.startZoom) >= 2 && pinchRef.current.anchor) {
           setIsFitWidthMode(false);
+          pendingZoomAnchorRef.current = pinchRef.current.anchor;
           setZoomLevel(finalZoom);
+        } else {
+          const wrapper = contentWrapperRef.current;
+          if (wrapper) {
+            wrapper.style.transform = 'none';
+            wrapper.style.transformOrigin = '';
+            wrapper.style.willChange = '';
+            wrapper.style.transition = '';
+          }
+          isScrollingProgrammaticallyRef.current = false;
         }
       }
     };
@@ -634,7 +756,7 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
       container.removeEventListener('gesturechange', handleGestureChange as any);
       container.removeEventListener('gestureend', handleGestureEnd as any);
     };
-  }, []);
+  }, [captureZoomAnchor]);
 
   // Spacebar pan detection
   useEffect(() => {
@@ -726,21 +848,41 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
   // Zoom helpers
   const handleZoomIn = () => {
     setIsFitWidthMode(false);
+    if (containerRef.current) {
+      const centerX = containerRef.current.clientWidth / 2;
+      const centerY = containerRef.current.clientHeight / 2;
+      pendingZoomAnchorRef.current = captureZoomAnchor(centerX, centerY);
+    }
     setZoomLevel((prev) => Math.min(250, prev + 20));
   };
 
   const handleZoomOut = () => {
     setIsFitWidthMode(false);
+    if (containerRef.current) {
+      const centerX = containerRef.current.clientWidth / 2;
+      const centerY = containerRef.current.clientHeight / 2;
+      pendingZoomAnchorRef.current = captureZoomAnchor(centerX, centerY);
+    }
     setZoomLevel((prev) => Math.max(35, prev - 20));
   };
 
   const handleResetZoom = () => {
     setIsFitWidthMode(false);
+    if (containerRef.current) {
+      const centerX = containerRef.current.clientWidth / 2;
+      const centerY = containerRef.current.clientHeight / 2;
+      pendingZoomAnchorRef.current = captureZoomAnchor(centerX, centerY);
+    }
     setZoomLevel(100);
   };
 
   const handleFitWidth = () => {
     setIsFitWidthMode(true);
+    if (containerRef.current) {
+      const centerX = containerRef.current.clientWidth / 2;
+      const centerY = containerRef.current.clientHeight / 2;
+      pendingZoomAnchorRef.current = captureZoomAnchor(centerX, centerY);
+    }
     const fitZoom = calculateFitWidthZoom();
     setZoomLevel(fitZoom);
   };
@@ -748,6 +890,9 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({
   const handleFitPage = () => {
     setIsFitWidthMode(false);
     if (!containerRef.current) return;
+    const centerX = containerRef.current.clientWidth / 2;
+    const centerY = containerRef.current.clientHeight / 2;
+    pendingZoomAnchorRef.current = captureZoomAnchor(centerX, centerY);
     const padding = 64;
     const availableHeight = containerRef.current.clientHeight - padding;
     if (availableHeight > 0 && renderedDimensions.height > 0) {
